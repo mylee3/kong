@@ -1,6 +1,5 @@
-local spec_helper = require "spec.spec_helpers"
-local http_client = require "kong.tools.http_client"
-local json = require "cjson"
+local helpers = require "spec.helpers"
+local cjson = require "cjson"
 local jwt_encoder = require "kong.plugins.jwt.jwt_parser"
 local fixtures = require "spec.plugins.jwt.fixtures"
 local base64 = require "base64"
@@ -16,43 +15,38 @@ local PAYLOAD = {
 
 describe("JWT access", function()
   local jwt_secret, base64_jwt_secret, rsa_jwt_secret_1, rsa_jwt_secret_2
-
+  local client
+  local api1, api2, api3, api4, api5, api6, api7, api8
+  local consumer1, consumer2, consumer3
+  
   setup(function()
-    spec_helper.prepare_db()
-    local fixtures = spec_helper.insert_fixtures {
-      api = {
-        {name = "tests-jwt", request_host = "jwt.com", upstream_url = "http://mockbin.com"},
-        {name = "tests-jwt2", request_host = "jwt2.com", upstream_url = "http://mockbin.com"},
-        {name = "tests-jwt3", request_host = "jwt3.com", upstream_url = "http://mockbin.com"},
-        {name = "tests-jwt4", request_host = "jwt4.com", upstream_url = "http://mockbin.com"},
-        {name = "tests-jwt5", request_host = "jwt5.com", upstream_url = "http://mockbin.com"}
-      },
-      consumer = {
-        {username = "jwt_tests_consumer"},
-        {username = "jwt_tests_base64_consumer"},
-        {username = "jwt_tests_rsa_consumer_1"},
-        {username = "jwt_tests_rsa_consumer_2"},
-      },
-      plugin = {
-        {name = "jwt", config = {}, __api = 1},
-        {name = "jwt", config = {uri_param_names = {"token", "jwt"}}, __api = 2},
-        {name = "jwt", config = {claims_to_verify = {"nbf", "exp"}}, __api = 3},
-        {name = "jwt", config = {key_claim_name = "aud"}, __api = 4},
-        {name = "jwt", config = {secret_is_base64 = true}, __api = 5}
-      },
-      jwt_secret = {
-        {__consumer = 1},
-        {__consumer = 2},
-        {__consumer = 3, algorithm = "RS256", rsa_public_key = fixtures.rs256_public_key},
-        {__consumer = 4, algorithm = "RS256", rsa_public_key = fixtures.rs256_public_key}
-      }
-    }
-
-    jwt_secret = fixtures.jwt_secret[1]
-    base64_jwt_secret = fixtures.jwt_secret[2]
-    rsa_jwt_secret_1 = fixtures.jwt_secret[3]
-    rsa_jwt_secret_2 = fixtures.jwt_secret[4]
-    spec_helper.start_kong()
+    helpers.dao:truncate_tables()
+    assert(helpers.prepare_prefix())
+    
+    api1 = assert(helpers.dao.apis:insert {name = "tests-jwt1", request_host = "jwt.com", upstream_url = "http://mockbin.com"})
+    api2 = assert(helpers.dao.apis:insert {name = "tests-jwt2", request_host = "jwt2.com", upstream_url = "http://mockbin.com"})
+    api3 = assert(helpers.dao.apis:insert {name = "tests-jwt3", request_host = "jwt3.com", upstream_url = "http://mockbin.com"})
+    api4 = assert(helpers.dao.apis:insert {name = "tests-jwt4", request_host = "jwt4.com", upstream_url = "http://mockbin.com"})
+    api5 = assert(helpers.dao.apis:insert {name = "tests-jwt5", request_host = "jwt5.com", upstream_url = "http://mockbin.com"})
+    
+    consumer1 = assert(helpers.dao.consumers:insert {username = "jwt_tests_consumer"})
+    consumer2 = assert(helpers.dao.consumers:insert {username = "jwt_tests_base64_consumer"})
+    consumer3 = assert(helpers.dao.consumers:insert {username = "jwt_tests_rsa_consumer_1"})
+    consumer3 = assert(helpers.dao.consumers:insert {username = "jwt_tests_rsa_consumer_2"})
+    
+    assert(helpers.dao.plugins:insert {name = "jwt", config = {}, api_id = api1})
+    assert(helpers.dao.plugins:insert {name = "jwt", config = {uri_param_names = {"token", "jwt"}}, api_id = api2})
+    assert(helpers.dao.plugins:insert {name = "jwt", config = {claims_to_verify = {"nbf", "exp"}}, api_id = api3})
+    assert(helpers.dao.plugins:insert {name = "jwt", config = {key_claim_name = "aud"}, api_id = api4})
+    assert(helpers.dao.plugins:insert {name = "jwt", config = {secret_is_base64 = true}, api_id = api5})
+    
+    jwt_secret = assert(helpers.dao.jwt_secrets:insert {consumer_id = consumer1.id})
+    base64_jwt_secret = assert(helpers.dao.jwt_secrets:insert {consumer_id = consumer2.id})
+    rsa_jwt_secret_1 = assert(helpers.dao.jwt_secrets:insert {consumer_id = consumer3.id, algorithm = "RS256", rsa_public_key = fixtures.rs256_public_key})
+    rsa_jwt_secret_2 = assert(helpers.dao.jwt_secrets:insert {consumer_id = consumer4.id, algorithm = "RS256", rsa_public_key = fixtures.rs256_public_key})
+    
+    assert(helpers.start_kong())
+    client = assert(helpers.http_client("127.0.0.1", helpers.test_conf.proxy_port))
   end)
 
   teardown(function()
@@ -61,16 +55,28 @@ describe("JWT access", function()
 
   describe("refusals", function()
     it("should return 401 Unauthorized if no JWT is found in the request", function()
-      local _, status = http_client.get(STUB_GET_URL, nil, {host = "jwt.com"})
-      assert.equal(401, status)
+      local res = assert(client:send {
+        method = "GET",
+        path = "/request",
+        headers = {
+          ["Host"] = "jwt.com"
+        }
+      })
+      assert.res_status(401, res)
     end)
     it("should return return 401 Unauthorized if the claims do not contain the key to identify a secret", function()
       local jwt = jwt_encoder.encode(PAYLOAD, "foo")
       local authorization = "Bearer "..jwt
-      local response, status = http_client.get(STUB_GET_URL, nil, {host = "jwt.com", authorization = authorization})
-      assert.equal(401, status)
-      local body = json.decode(response)
-      assert.equal("No mandatory 'iss' in claims", body.message)
+      local res = assert(client:send {
+        method = "GET",
+        path = "/request",
+        headers = {
+          ["Authorization"] = authorization,
+          ["Host"] = "jwt.com"
+        }
+      })
+      assert.res_status(401, res)
+      assert.equal("No mandatory 'iss' in claims", res.message)
     end)
     it("should return 403 Forbidden if the iss does not match a credential", function()
       PAYLOAD.iss = "123456789"
