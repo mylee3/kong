@@ -175,6 +175,23 @@
   # password: cassandra
 
 ######
+## Etcd configuration (keyspace, authentication, client-to-node encryption)
+# etcd:
+  ######
+  ## Host for etcd
+  # host:
+  #   - "http://localhost:4001"
+
+  ## Peer for etcd
+  # peer:
+  #  - "http://localhost:7001"
+
+  ######
+  ## Name of the keyspace used by Kong. Will be created if it does not exist.
+  # keyspace: kong
+
+
+######
 ## Kong will send anonymous reports to Mashape. This helps Mashape fixing bugs/errors and improving Kong.
 ## By default is `true`.
 # send_anonymous_reports: true
