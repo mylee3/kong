@@ -1,7 +1,7 @@
-local cjson = require('cjson');
-local uuid = require ('lua_uuid');
+local cjson = require('cjson')
+local uuid = require ('lua_uuid')
 local basexx = require('basexx')
-local etcd = require ('etcd.luasocket');
+local etcd = require ('etcd.luasocket')
 local timestamp = require "kong.tools.timestamp"
 local Errors = require "kong.dao.errors"
 local BaseDB = require "kong.dao.base_db"
@@ -157,6 +157,7 @@ function EtcdDB:insert(table_name, schema, model, constraints, options)
 
   local encodedTable = encodeTable(model)
 
+  --sets row if there is ttl given
   local res, error
   if options and options.ttl then
     local ttl = options.ttl
@@ -164,64 +165,147 @@ function EtcdDB:insert(table_name, schema, model, constraints, options)
       ttl = ttl - 1
     end
     res, error = cli:set(self.driver_url..self.keyspace..'/tables/'..table_name..'/'..primary_key, encodedTable, ttl);
+
+  --sets row without specifying ttl
   else
     res, error = cli:set(self.driver_url..self.keyspace..'/tables/'..table_name..'/'..primary_key, encodedTable);
   end
   if not error then
 
-    local result = cjson.decode(res.body.node.value)
-    local ret = decodeTable(result)
+    --sets up indices for each field of row to assist with find_all().
+    local key_path = self.driver_url..self.keyspace..'/tables/'..table_name..'/'..primary_key
+    for k, v in pairs(encodedTable) do
+      _, error = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k)
+      if not error then
+        _, error = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k .. '/' .. v)
+        if not error then
+          indexRes, error = cli:set(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k.. '/' .. v .. '/' .. primary_key, key_path)
 
-    return ret, nil
+        end
+      end
+    end
 
+    if not error then
+      local ret = decodeTable(cjson.decode(res.body.node.value))
+      return ret, nil
+    end
   else
     return nil, error
   end
+end
+
+local function contains(t, e)
+  for i = 1,#t do
+    if t[i] == e then return true end
+  end
+  return false
 end
 
 function EtcdDB:find_all(table_name, filter_keys, schema)
 
   local cli = self:connect()
 
-  local res, error = cli:readdir(self.driver_url..self.keyspace..'/tables/'..table_name, true);
+  local results = {}
+  local paths = {}
 
+  local res, error = cli:readdir(self.driver_url..self.keyspace..'/tables/'..table_name, true);
   if error then
     return nil, error
+  elseif res.status == 404 and table_name ~= "schema_migrations" then
+    return nil, table_name .." table not found"
   end
 
-  --Kong likely only searches for filter_keys with AND properties
-  local results = {}
-  --Paths allows delete() without adding _self to results
-  local paths = {}
-  if res.status == 200 then
-    if res.body.node.nodes ~= nil then
+  --for nil filter_keys, retrieves everything in the directory
+  if(filter_keys == nil) then
+
+    if res.status == 200 and res.body.node.nodes ~= nil then
       for _,row_string in ipairs(res.body.node.nodes) do
-        local row = cjson.decode(row_string.value)
-        local path = row_string.key;
-        local add;
+        results[#results+1] = decodeTable(cjson.decode(row_string.value))
+        paths[#paths+1] = row_string.key;
+      end
+    end
 
-        if filter_keys == nil then
-          add = true
-        else
-
-          local encodedConditions = encodeTable(filter_keys)
-
-          for k,v in pairs(encodedConditions) do -- AND
-            add = (row[k] == v)
-            if not add then
-              break
-            end
-          end
+  else
+    --checks if only the primary key is given
+    if schema ~= nil and schema.primary_key ~= nil then
+      local lone_key = false
+      for k, v in pairs(filter_keys) do
+        if k == schema.primary_key[1] and next(filter_keys, k) == nil then
+          lone_key = true
         end
-        if add then
-          local decodedRow = decodeTable(row)
-          results[#results+1] = decodedRow
-          paths[#paths+1] = path
+        break
+      end
+
+      if lone_key then
+        --searching by primary key alone
+        local res, err = cli:get(self.driver_url..self.keyspace..'/tables/'..table_name .. '/' .. filter_keys[schema.primary_key[1]])
+        if err then
+          return nil, err
+        else
+          if res.status == 200 then
+            results[1] = decodeTable(res.body.node.value)
+            paths[1] = self.driver_url..self.keyspace..'/tables/'..table_name .. '/' .. filter_keys[schema.primary_key[1]]
+          else
+            results = {}
+            paths = {}
+          end
+        return results, nil, paths
         end
       end
     end
-  elseif res.status == 404 and table_name ~= "schema_migrations" then
-    return nil, table_name .." table not found"
+
+    --reads from indices if filter_keys are given
+    local key_paths = {}
+    local encodedConditions = encodeTable(filter_keys)
+    local first = true
+    for k, v in pairs(encodedConditions) do
+      local res, err = cli:readdir(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k .. '/' .. v)
+      if err then
+        return nil, err
+      end
+      if(res.status == 200) then
+        if first then
+          if res.body.node.nodes ~= nil then
+            for _,row_string in ipairs(res.body.node.nodes) do
+              key_paths[#key_paths+1] = cjson.decode(row_string.value)
+            end
+          else
+            return {}, nil, {}
+          end
+          first = false
+        else
+          if res.body.node.nodes == nil then
+            return {}, nil, {}
+          else
+            local newRes = {}
+            for _,row_string in ipairs(res.body.node.nodes) do
+              local newKeyPath = cjson.decode(row_string.value)
+              if contains(key_paths, newKeyPath) then
+                newRes[#newRes+1] = newKeyPath
+              end
+            end
+            key_paths = newRes
+            if #key_paths == 0 then
+              return {}, nil, {}
+            end
+          end
+        end
+      else
+        return {}, nil, {}
+      end
+    end
+
+    --use each key-path as key to find row
+    for _, key_path in ipairs(key_paths) do
+      local res, err = cli:get(key_path)
+      if err then
+        return nil, err
+      end
+      if(res.status == 200) then
+        results[#results+1] = decodeTable(res.body.node.value)
+        paths[#paths+1] = key_path
+      end
+    end
   end
 
   return results, nil, paths
@@ -287,11 +371,20 @@ function EtcdDB:delete(table_name, schema, filter_keys, constraints)
   end
 
   if not error then
-    for _, v in ipairs(paths) do
+    for k, v in ipairs(paths) do
       local _, _err = cli:delete(v);
       if _err then
         return nil, "Error while deleting '"..v.."' (".._err..")"
       end
+
+      for key, val in pairs(res[k]) do
+        local row = res[k]
+        encodedVal = basexx.to_crockford(cjson.encode(val))
+        local retrieve = row[schema.primary_key[1]]
+        indexRes, error = cli:delete(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  key.. '/' .. encodedVal .. '/' .. retrieve)
+
+      end
+
     end
     if constraints ~= nil then
       cascade_delete(self, filter_keys, constraints)
@@ -334,15 +427,40 @@ function EtcdDB:update(table_name, schema, constraints, filter_keys, values, nil
 
         local encodedTable = encodeTable(model)
         local res, error = cli:setx(self.driver_url..self.keyspace..'/tables/'..table_name..'/'..model[schema.primary_key[1]], encodedTable, options.ttl);
-        if not error then
-          result = cjson.decode(res.body.node.value)
-          ret = decodeTable(result)
 
-          return ret, nil
+        if(res.body.prevNode ~= nil) then
+          --Removing indices from original row
+          local origRow = cjson.decode(res.body.prevNode.value)
+
+          for k, v in pairs(origRow) do
+            indexRes, error = cli:delete(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k.. '/' .. v .. '/' .. model[schema.primary_key[1]])
+          end
+        end
+
+        if not error then
+          local key_path = self.driver_url..self.keyspace..'/tables/'..table_name..'/'..model[schema.primary_key[1]]
+          for k, v in pairs(encodedTable) do
+            _, error = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k)
+            if not error then
+              _, error = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k .. '/' .. v)
+              if not error then
+                indexRes, error = cli:set(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k.. '/' .. v .. '/' .. model[schema.primary_key[1]], key_path)
+
+              end
+            end
+          end
+
+          if not error then
+            result = cjson.decode(res.body.node.value)
+            ret = decodeTable(result)
+
+            return ret, nil
+          else
+            return nil, error
+          end
         else
           return nil, error
         end
-
       end
     else
       return nil, "Cannot update TTL on entities that have more than one primary_key"
@@ -353,7 +471,6 @@ function EtcdDB:update(table_name, schema, constraints, filter_keys, values, nil
   --note that values are schema fields that aren't primary keys
 
   local row, err = self:find(table_name, schema, filter_keys)
-
   if err then
     return nil, err
   elseif row then
@@ -362,6 +479,7 @@ function EtcdDB:update(table_name, schema, constraints, filter_keys, values, nil
         model[k] = v -- Populate the model to be used later for the insert
       end
     end
+    --Kong already ensures that tbl has primary_keys
 
     if full then
       for col in pairs(nils) do
@@ -375,10 +493,32 @@ function EtcdDB:update(table_name, schema, constraints, filter_keys, values, nil
     local encodedTable = encodeTable(model)
 
     local res, error = cli:setx(self.driver_url..self.keyspace..'/tables/'..table_name..'/'..model[schema.primary_key[1]], encodedTable);
+
+    --Removing indices from original row
+    local origRow = cjson.decode(res.body.prevNode.value)
+
+    for k, v in pairs(origRow) do
+      indexRes, error = cli:delete(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k.. '/' .. v .. '/' .. model[schema.primary_key[1]])
+    end
+
     if not error then
-      result = cjson.decode(res.body.node.value)
-      ret = decodeTable(result)
-      return ret, nil
+      local key_path = self.driver_url..self.keyspace..'/tables/'..table_name..'/'..model[schema.primary_key[1]]
+      for k, v in pairs(encodedTable) do
+        _, error = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k)
+        if not error then
+          _, error = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k .. '/' .. v)
+          if not error then
+            indexRes, error = cli:set(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k.. '/' .. v .. '/' .. model[schema.primary_key[1]], key_path)
+          end
+        end
+      end
+
+      if not error then
+
+        local result = cjson.decode(res.body.node.value)
+        local ret = decodeTable(result)
+        return ret, nil
+      end
     else
       return nil, error
     end
@@ -387,6 +527,7 @@ end
 
 --Function from http://stackoverflow.com/questions/15706270/sort-a-table-in-lua
 local function spairs(t, order)
+
     -- collect the keys
     local keys = {}
     for k in pairs(t) do keys[#keys+1] = k end
@@ -413,42 +554,79 @@ local function find_sorted(self, table_name, filter_keys, schema)
 
   local cli = self:connect()
 
-  local res, error = cli:readdir(self.driver_url..self.keyspace..'/tables/'..table_name, true, true);
-
-  if error then
-    return nil, error
-  end
-
-  --Kong likely only searches for conditions with AND properties
-  local key = schema.primary_key[1]
   local results = {}
+  local key = schema.primary_key[1]
   local keys = {}
-  if res.status == 200 then
+
+  if(filter_keys == nil) then
+    local res, error = cli:readdir(self.driver_url..self.keyspace..'/tables/'..table_name, true);
+    if error then
+      return nil, error
+    end
     if res.body.node.nodes ~= nil then
       for _,row_string in ipairs(res.body.node.nodes) do
         local row = cjson.decode(row_string.value)
-        local path = row_string.key;
-        local add;
+        local decodedRow = decodeTable(row)
+        results[#results+1] = decodedRow
+        keys[#keys+1] = row[key]
+      end
+    end
 
-        if filter_keys == nil then
-          add = true
+  else
+    local key_paths = {}
+    local encodedConditions = encodeTable(filter_keys)
+    local first = true
+    for k, v in pairs(encodedConditions) do
+      local res, err = cli:readdir(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k .. '/' .. v)
+      if err then
+        return nil, err
+      end
+
+      if(res.status == 200) then
+        if first then
+          if res.body.node.nodes ~= nil then
+            for _,row_string in ipairs(res.body.node.nodes) do
+              key_paths[#key_paths+1] = cjson.decode(row_string.value)
+            end
+          else
+            return {}, nil, {}
+          end
+          first = false
         else
-          local encodedConditions = encodeTable(filter_keys)
-          for k,v in pairs(encodedConditions) do -- AND
-            add = (row[k] == v)
-            if not add then
-              break
+          if res.body.node.nodes == nil then
+            return {}, nil, {}
+          else
+            local newRes = {}
+            for _,row_string in ipairs(res.body.node.nodes) do
+              local newKeyPath = cjson.decode(row_string.value)
+              if contains(key_paths, newKeyPath) then
+                newRes[#newRes+1] = newKeyPath
+              end
+            end
+            key_paths = newRes
+            if #key_paths == 0 then
+              return {}, nil, {}
             end
           end
         end
-        if add then
-          local decodedRow = decodeTable(row)
-          results[#results+1] = decodedRow
-          keys[#keys+1] = decodedRow[key]
-        end
+      else
+        return {}, nil, {}
+      end
+    end
+    for _, key_path in ipairs(key_paths) do
+      local res, err = cli:get(key_path)
+      if err then
+        return nil, err
+      end
+      if(res.status == 200) then
+        results[#results+1] = decodeTable(res.body.node.value)
+        local row = decodeTable(res.body.node.value)
+        keys[#keys+1] = row[key]
       end
     end
   end
+
+
   sortedResults = {}
   for k,v in spairs(keys, function(t,a,b) return t[b] < t[a] end) do
     sortedResults[#sortedResults+1] = results[k]
@@ -467,7 +645,7 @@ function EtcdDB:find_page(table_name, tbl, page, page_size, schema)
     page = 1
     --Only calls find_sorted() the first time
     results, err = find_sorted(self, table_name, tbl, schema)
-    --Stores page as a variable
+    --Stores page as a variable for "cache"
     self.page = results
     if err then
       return nil, err
@@ -481,7 +659,6 @@ function EtcdDB:find_page(table_name, tbl, page, page_size, schema)
   local total_pages = math.ceil(total_count/page_size)
   local offset = page_size * (page - 1)
 
-  --this solution is so slow.  Indexing would be helpful here.
   local max_size = math.min((page * page_size), total_count)
   local rows = {}
   for k, v in ipairs(results) do
@@ -513,10 +690,16 @@ function EtcdDB:truncate_table(table_name)
     return error
   else
     for _, v in ipairs(paths) do
-      local _, _err = cli:delete(v);
+      local res, _err = cli:delete(v);
       if _err then
-        return nil, "Error while deleting '"..v.."' (".._err..")"
+        return "Error while deleting '"..v.."' (".._err..")"
+
       end
+    end
+
+    local res, _err = cli:rmdir(self.driver_url..self.keyspace..'/indices/'..table_name, true)
+    if _err then
+      return _err
     end
   end
   return nil
@@ -542,41 +725,8 @@ end
 function EtcdDB:setRow(table_name, primary_keys, model, val)
 
   local cli = self:connect()
-  local res, error = cli:readdir(self.driver_url..self.keyspace..'/tables/'..table_name, true);
-  if error then
-    return nil, error
-  end
 
-  local results = {}
-  local paths = {}
-  if res.status == 200 then
-    if res.body.node.nodes ~= nil then
-      for _,row_string in ipairs(res.body.node.nodes) do
-        local row = cjson.decode(row_string.value)
-        local path = row_string.key;
-        local add;
-
-        if primary_keys == nil then
-          add = true
-        else
-          local encodedConditions = encodeTable(primary_keys)
-          for k,v in pairs(encodedConditions) do -- AND
-            add = (row[k] == v)
-            if not add then
-              break
-            end
-          end
-        end
-        if add then
-          local decodedRow = decodeTable(row)
-          results[#results+1] = decodedRow
-          paths[#paths+1] = path
-        end
-      end
-    end
-  elseif res.status == 404 then
-    return nil, "table not found"
-  end
+  local results, _, paths = self:find_all(table_name, primary_keys, nil)
 
   local res, err
 
@@ -588,12 +738,40 @@ function EtcdDB:setRow(table_name, primary_keys, model, val)
     end
     encodedTable = encodeTable(model)
     res, err = cli:set(self.driver_url..self.keyspace..'/tables/'..table_name .. '/' .. UUID, encodedTable)
+    if not err then
+      local key_path = self.driver_url..self.keyspace..'/tables/'..table_name..'/'.. UUID
+      for k, v in pairs(encodedTable) do
+        _, err = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k)
+        if not err then
+          _, err = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k .. '/' .. v)
+          if not err then
+            indexRes, err = cli:set(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k.. '/' .. v .. '/' .. UUID, key_path)
+
+          end
+        end
+      end
+    end
   else
     if(results[1] ~= nil) then
       model.value = results[1].value + val
     end
     encodedTable = encodeTable(model)
     res, err = cli:set(paths[1], encodedTable)
+
+    if not err then
+      local key_path = paths[1]
+      for k, v in pairs(encodedTable) do
+        _, err = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k)
+        if not err then
+          _, err = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/'..table_name .. '/' .. k .. '/' .. v)
+          if not error then
+            indexRes, err = cli:set(self.driver_url..self.keyspace..'/indices/'..table_name ..'/' ..  k.. '/' .. v .. '/' .. encodedTable.id, key_path)
+
+          end
+        end
+      end
+    end
+
   end
   if not err then
     result = cjson.decode(res.body.node.value)
@@ -635,10 +813,34 @@ function EtcdDB:record_migration(idP, nameP)
   else
     row.migrations[#row.migrations+1] = nameP
   end
-
   local cli = self:connect()
   local encodedTable = encodeTable(row)
   local res, err = cli:set(self.driver_url..self.keyspace..'/tables/schema_migrations/' .. idP, encodedTable)
+
+
+
+  if(res.body.prevNode ~= nil) then
+    --Removing indices from original row
+    local origRow = cjson.decode(res.body.prevNode.value)
+
+    for k, v in pairs(origRow) do
+      indexRes, error = cli:delete(self.driver_url..self.keyspace..'/indices/schema_migrations/' ..  k.. '/' .. v .. '/' .. idP)
+    end
+  end
+
+  if not err then
+    local key_path = self.driver_url..self.keyspace..'/tables/schema_migrations/'..idP
+    for k, v in pairs(encodedTable) do
+      _, err = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/schema_migrations/' .. k)
+      if not err then
+        _, err = cli:mkdirnx(self.driver_url..self.keyspace..'/indices/schema_migrations/' .. k .. '/' .. v)
+        if not error then
+          indexRes, error = cli:set(self.driver_url..self.keyspace..'/indices/schema_migrations/' ..  k.. '/' .. v .. '/' .. idP, key_path)
+
+        end
+      end
+    end
+  end
   if err then
     return err
   end
@@ -646,3 +848,4 @@ function EtcdDB:record_migration(idP, nameP)
 end
 
 return EtcdDB
+
