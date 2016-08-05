@@ -61,7 +61,7 @@ describe("Configuration validation", function()
     assert.truthy(errors)
     assert.equal("must be a string", errors.proxy_listen)
     assert.equal("must be a string", errors.database[1])
-    assert.equal("must be one of: 'cassandra, postgres'", errors.database[2])
+    assert.equal("must be one of: 'cassandra, postgres, etcd'", errors.database[2])
     assert.equal("must be a array", errors["cassandra.contact_points"])
     assert.equal("must be a boolean", errors["cassandra.ssl.enabled"])
     assert.falsy(errors.ssl_cert_path)
@@ -84,7 +84,7 @@ describe("Configuration validation", function()
   it("should validate the selected database property", function()
     local ok, errors = config.validate({database = "foo"})
     assert.False(ok)
-    assert.equal("must be one of: 'cassandra, postgres'", errors.database)
+    assert.equal("must be one of: 'cassandra, postgres, etcd'", errors.database)
   end)
   describe("database: cassandra", function()
     it("should accept proper cassandra properties", function()
@@ -149,6 +149,28 @@ describe("Configuration validation", function()
         local ok, errors = config.validate(c)
         assert.False(ok)
         assert.truthy(errors)
+      end
+    end)
+  end)
+  describe("database: etcd", function()
+    it("should accept proper etcd properties", function()
+      local valids = {
+        {
+          host = "http://localhost:4001",
+          peer = "http://localhost:7001",
+          keyspace = "kong",
+          driver_url = "/etcd-db-driver/keyspaces/"
+        }
+      }
+
+      for _, v in ipairs(valids) do
+        local c = {
+          database = "etcd",
+          etcd = v
+        }
+        local ok, errors = config.validate(c)
+        assert.falsy(errors)
+        assert.True(ok)
       end
     end)
   end)
@@ -274,4 +296,3 @@ describe("Configuration validation", function()
     assert.falsy(errors)
   end)
 end)
-

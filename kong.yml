@@ -113,6 +113,24 @@
   # password: ""
 
 ######
+## Etcd configuration (keyspace, authentication, client-to-node encryption)
+# etcd:
+  ######
+  ## Host for etcd
+  # host: "http://localhost:4001"
+
+  ## Peer for etcd
+  # peer: "http://localhost:7001"
+
+  ######
+  ## Name of the keyspace used by Kong. Will be created if it does not exist.
+  # keyspace: kong
+
+  ######
+  ## Url for etcd driver to use.
+  # driver_url: '/etcd-db-driver/keyspaces/'
+
+######
 ## Cassandra configuration (keyspace, authentication, client-to-node encryption)
 # cassandra:
   ######

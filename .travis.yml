@@ -28,6 +28,10 @@ env:
   matrix:
     - TEST_SUITE=unit
     - TEST_SUITE=integration
+      DATABASE=etcd
+    - TEST_SUITE=plugins
+      DATABASE=etcd
+    - TEST_SUITE=integration
       DATABASE=cassandra
     - TEST_SUITE=plugins
       DATABASE=cassandra

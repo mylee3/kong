@@ -24,6 +24,8 @@ helpers.for_each_dao(function(db_type, default_opts, TYPES)
         local invalid_opts = utils.shallow_copy(default_opts)
         if db_type == TYPES.CASSANDRA then
           invalid_opts.keyspace = "_inexistent_"
+        elseif db_type == TYPES.ETCD then
+          invalid_opts.database = "_inexistent_"
         elseif db_type == TYPES.POSTGRES then
           invalid_opts.database = "_inexistent_"
         end
@@ -32,6 +34,8 @@ helpers.for_each_dao(function(db_type, default_opts, TYPES)
 
         local cur_migrations, err = xfactory:current_migrations()
         if db_type == TYPES.CASSANDRA then
+          assert.same({}, cur_migrations)
+        elseif db_type == TYPES.ETCD then
           assert.same({}, cur_migrations)
         elseif db_type == TYPES.POSTGRES then
           assert.truthy(err)

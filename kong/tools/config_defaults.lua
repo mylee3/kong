@@ -34,7 +34,7 @@ return {
       ["ttl_on_failure"] = {type = "number", default = 3600, min = 60}
     }
   },
-  ["database"] = {type = "string", default = "cassandra", enum = {"cassandra", "postgres"}},
+  ["database"] = {type = "string", default = "cassandra", enum = {"cassandra", "postgres", "etcd"}},
   ["postgres"] = {
     type = "table",
     content = {
@@ -67,6 +67,15 @@ return {
           ["certificate_authority"] = {type = "string", nullable = true}
         }
       }
+    }
+  },
+  ["etcd"] = {
+    type = "table",
+    content = {
+      ["host"] = {type = "string", default = "http://localhost:4001"},
+      ["peer"] = {type = "string", default = "http://localhost:7001"},
+      ["keyspace"] = {type = "string", default = "kong"},
+      ["driver_url"] = {type = "string", default = '/etcd-db-driver/keyspaces/'}
     }
   },
   ["ssl_cert_path"] = {type = "string", nullable = true},

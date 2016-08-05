@@ -38,6 +38,9 @@ local DEFAULT_ENV_VALUES = {
       ["postgres"] = {
         ["database"] = "kong_tests"
       },
+      ["etcd"] = {
+        ["keyspace"] = "kong_tests"
+      },
       ["cluster"] = {
         ["profile"] = "local"
       }
@@ -55,6 +58,9 @@ local DEFAULT_ENV_VALUES = {
       },
       ["postgres"] = {
         ["database"] = "kong_development"
+      },
+      ["etcd"] = {
+        ["keyspace"] = "kong_development"
       },
       ["cluster"] = {
         ["profile"] = "local"
